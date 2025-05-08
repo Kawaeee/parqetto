@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Parqetto</title>
+  <!-- Random favicon from Tabler Icons -->
+  <link rel="icon" href="https://unpkg.com/@tabler/icons@3.31.0/icons/arrows-random.svg" type="image/svg+xml" />
+  <!-- Tailwind CSS with dark mode -->
+  <script>
+    window.tailwind = window.tailwind || {};
+    window.tailwind.config = { darkMode: 'class' };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- DataTables CSS -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.5/css/jquery.dataTables.min.css" />
+  <!-- jQuery & DataTables JS -->
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
+</head>
+<body class="min-h-screen bg-gray-900 text-gray-100 p-6">
+  <header class="mb-6 flex items-center justify-between flex-wrap">
+    <h1 class="text-4xl font-extrabold">Parqetto</h1>
+    <div class="mt-4 sm:mt-0">
+      <label for="fileInput" class="cursor-pointer inline-flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-md transition">
+        <span>Select Parquet File</span>
+      </label>
+      <input type="file" id="fileInput" accept=".parquet" class="hidden" />
+    </div>
+  </header>
+
+  <div id="loading" class="hidden flex items-center space-x-2 mb-4">
+    <div class="animate-spin rounded-full h-6 w-6 border-t-2 border-indigo-500"></div>
+    <span>Loading...</span>
+  </div>
+
+  <!-- Basic metrics grid -->
+  <div id="stats-basic" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-6"></div>
+
+  <!-- Detailed stats grid: null, distinct, numeric, top values -->
+  <div id="stats-detail" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-6"></div>
+
+  <div class="overflow-auto">
+    <table id="preview" class="display w-full bg-gray-800 rounded-lg"></table>
+  </div>
+
+  <script type="module">
+    import { parquetReadObjects, parquetMetadataAsync, parquetSchema } from 'https://cdn.jsdelivr.net/npm/hyparquet/src/hyparquet.min.js';
+
+    const fileInput = document.getElementById('fileInput');
+    const loadingEl = document.getElementById('loading');
+    const basicEl = document.getElementById('stats-basic');
+    const detailEl = document.getElementById('stats-detail');
+    const tableEl = document.getElementById('preview');
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      // Reset UI
+      basicEl.innerHTML = '';
+      detailEl.innerHTML = '';
+      if ($.fn.DataTable.isDataTable('#preview')) {
+        $('#preview').DataTable().clear().destroy();
+      }
+      loadingEl.classList.remove('hidden');
+
+      // Load and parse file
+      const buffer = await file.arrayBuffer();
+      const metadata = await parquetMetadataAsync(buffer);
+      const totalRows = Number(metadata.num_rows);
+      const schemaInfo = parquetSchema(metadata);
+      const colNames = schemaInfo.children.map(c => c.element.name);
+      const allData = await parquetReadObjects({ file: buffer, rowFormat: 'object', rowStart: 0, rowEnd: totalRows });
+      const previewData = allData.slice(0, 1000);
+
+      // Compute stats
+      const fileSizeKB = (file.size / 1024).toFixed(1);
+      const nullCounts = {}, distinctCounts = {}, numericStats = {}, freqMaps = {};
+      colNames.forEach(col => {
+        nullCounts[col] = 0;
+        distinctCounts[col] = new Set();
+        numericStats[col] = { sum: 0, count: 0, min: Infinity, max: -Infinity };
+        freqMaps[col] = new Map();
+      });
+      allData.forEach(row => {
+        colNames.forEach(col => {
+          const v = row[col];
+          // Null and distinct
+          if (v == null) nullCounts[col]++;
+          else distinctCounts[col].add(v);
+          // Numeric stats
+          if (typeof v === 'number') {
+            const s = numericStats[col];
+            s.sum += v; s.count++;
+            s.min = Math.min(s.min, v);
+            s.max = Math.max(s.max, v);
+          }
+          // Frequency
+          if (v != null) {
+            const count = freqMaps[col].get(v) || 0;
+            freqMaps[col].set(v, count + 1);
+          }
+        });
+      });
+
+      // Basic cards
+      const basics = [
+        { title: 'File name', value: file.name },
+        { title: 'File size (KB)', value: fileSizeKB },
+        { title: 'Rows (total)', value: totalRows },
+        { title: 'Columns', value: colNames.length }
+      ];
+      basics.forEach(b => {
+        basicEl.innerHTML += `<div class="p-4 bg-gray-800 rounded-lg shadow">
+          <p class="text-sm text-gray-400">${b.title}</p>
+          <p class="text-lg font-semibold">${b.value}</p>
+        </div>`;
+      });
+
+      // Detailed cards
+      // Null counts
+      detailEl.innerHTML += `<div class="p-4 bg-gray-800 rounded-lg shadow">
+        <p class="text-sm text-gray-400">Null Counts</p>
+        ${colNames.map(col => `<p><strong>${col}:</strong> ${nullCounts[col]}</p>`).join('')}
+      </div>`;
+      // Distinct counts
+      detailEl.innerHTML += `<div class="p-4 bg-gray-800 rounded-lg shadow">
+        <p class="text-sm text-gray-400">Distinct Counts</p>
+        ${colNames.map(col => `<p><strong>${col}:</strong> ${distinctCounts[col].size}</p>`).join('')}
+      </div>`;
+      // Numeric stats
+      detailEl.innerHTML += `<div class="p-4 bg-gray-800 rounded-lg shadow">
+        <p class="text-sm text-gray-400">Numeric Stats</p>
+        ${colNames.filter(c => numericStats[c].count > 0).map(col => {
+          const s = numericStats[col];
+          const mean = (s.sum / s.count).toFixed(2);
+          return `<p><strong>${col}:</strong> min=${s.min}, max=${s.max}, mean=${mean}</p>`;
+        }).join('')}
+      </div>`;
+      // Top values
+      detailEl.innerHTML += `<div class="p-4 bg-gray-800 rounded-lg shadow">
+        <p class="text-sm text-gray-400">Top Values (Top 3)</p>
+        ${colNames.map(col => {
+          const topN = [...freqMaps[col].entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([val, cnt]) => `${val} (${cnt})`)
+            .join(', ');
+          return `<p><strong>${col}:</strong> ${topN}</p>`;
+        }).join('')}
+      </div>`;
+
+      // Build and render preview
+      tableEl.innerHTML = '<thead><tr>' + colNames.map(c => `<th>${c}</th>`).join('') + '</tr></thead>';
+      loadingEl.classList.add('hidden');
+      $('#preview').DataTable({
+        data: previewData,
+        columns: colNames.map(c => ({ title: c, data: c })),
+        pageLength:10,
+        lengthMenu:[10,25,50,100],
+        destroy:true
+      });
+    });
+  </script>
+</body>
+</html>
